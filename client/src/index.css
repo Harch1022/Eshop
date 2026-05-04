@@ -1,65 +1,69 @@
-:root {
-  --primary-blue: #007bff;
-  --secondary-blue: #014085;
-  --primary-green: #f5fff5;
-}
+@import "tailwindcss";
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+@theme {
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-200: #bfdbfe;
+  --color-brand-300: #93c5fd;
+  --color-brand-400: #60a5fa;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+  --color-brand-700: #1d4ed8;
+  --color-brand-800: #1e40af;
+  --color-brand-900: #1e3a8a;
+  --color-accent-500: #f59e0b;
+  --color-accent-600: #d97706;
 }
 
 html {
-  font-size: 16px; 
-  font-family: Arial, sans-serif;
-  background-color: #f9f9f9;
-  color: #222;
   scroll-behavior: smooth;
 }
 
-body, #root {
-  min-height: 100vh;
-  background-color: #f9f9f9;
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-a {
-  color: var(--primary-blue);
-  text-decoration: none;
+.glass {
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-a:hover,
-a:focus {
-  text-decoration: underline;
+.glass-card {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
 }
 
-button {
-  font-family: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  border: none;
-  border-radius: 4px;
-  background-color: var(--primary-blue);
-  color: white;
-  padding: 8px 16px;
-  transition: background-color 0.3s ease;
+.animate-float {
+  animation: float 6s ease-in-out infinite;
 }
 
-button:hover,
-button:focus {
-  background-color: var(--secondary-blue);
-  outline: none;
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-20px); }
 }
 
-h1, h2, h3, h4, h5, h6 {
-  font-weight: 600;
-  color: #222;
+.card-hover {
+  transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
-img {
-  max-width: 100%;
-  display: block;
+.card-hover:hover {
+  transform: translateY(-8px);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15);
 }
 
+.shimmer {
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}

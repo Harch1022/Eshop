@@ -8,6 +8,7 @@ const insert = require('./insert');            // Insert functions
 const update = require('./update');            // Update functions (if used externally)
 const get = require('./get');                  // Get functions
 const del = require('./delete');               // Delete functions
+const shipping = require('./shipping');       // Shipping functions
 
 const app = express();
 const port = 3001;
@@ -27,8 +28,28 @@ create.createUsersTable();
 create.createProductsTable();
 create.createOrdersTable();
 create.createOrderItemsTable();
+create.createShippingTable();
+create.seedAdminUser();
 create.createCategoryTypeTable();
 create.createCategoryItemTable();
+
+// ---------------- DEBUG ENDPOINT ----------------
+app.get('/api/debug/db', (req, res) => {
+  const info = {};
+  connection.query("SHOW COLUMNS FROM Order_Items LIKE 'Price'", (err, results) => {
+    info.orderItemsHasPrice = !err && results.length > 0;
+    connection.query("SHOW COLUMNS FROM Shipping LIKE 'PaymentMethod'", (err, results) => {
+      info.shippingHasPaymentMethod = !err && results.length > 0;
+      connection.query("SELECT COUNT(*) AS cnt FROM Users", (err, results) => {
+        info.userCount = results?.[0]?.cnt || 0;
+        connection.query("SELECT COUNT(*) AS cnt FROM Products", (err, results) => {
+          info.productCount = results?.[0]?.cnt || 0;
+          res.json(info);
+        });
+      });
+    });
+  });
+});
 
 // ---------------- GET ENDPOINTS ----------------
 
@@ -129,16 +150,102 @@ app.get('/api/products', (req, res) => {
   }
 });
 
-// 4) GET All Orders
+// 4) GET Orders (with optional ?userId=X filter, includes shipping info)
 app.get('/api/orders', (req, res) => {
-  get.getAllOrders((err, orders) => {
+  const { userId } = req.query;
+  let query;
+  let params = [];
+
+  if (userId) {
+    query = `
+      SELECT o.*, s.Status AS ShippingStatus, s.TrackingNumber, s.RecipientName, s.Phone, s.Address,
+             s.CreatedAt AS ShippingCreatedAt, s.UpdatedAt AS ShippingUpdatedAt, s.PaymentMethod
+      FROM Orders o
+      LEFT JOIN Shipping s ON o.OrderID = s.OrderID
+      WHERE o.UserID = ?
+      ORDER BY o.OrderDate DESC
+    `;
+    params = [userId];
+  } else {
+    query = `
+      SELECT o.*, s.Status AS ShippingStatus, s.TrackingNumber, s.RecipientName, s.Phone, s.Address,
+             s.CreatedAt AS ShippingCreatedAt, s.UpdatedAt AS ShippingUpdatedAt, s.PaymentMethod
+      FROM Orders o
+      LEFT JOIN Shipping s ON o.OrderID = s.OrderID
+      ORDER BY o.OrderDate DESC
+    `;
+  }
+
+  connection.query(query, params, (err, orders) => {
     if (err) {
-      return res.status(500).json({
-        error: "Error fetching orders",
-        details: err.message,
-      });
+      return res.status(500).json({ error: "Error fetching orders", details: err.message });
     }
-    res.status(200).json(orders);
+
+    // For each order, fetch its items
+    if (orders.length === 0) return res.status(200).json(orders);
+
+    let completed = 0;
+    orders.forEach((order, idx) => {
+      connection.query(
+        `SELECT oi.*, p.ProductName, p.ProductImage
+         FROM Order_Items oi
+         JOIN Products p ON oi.ProductID = p.ProductID
+         WHERE oi.OrderID = ?`,
+        [order.OrderID],
+        (err, items) => {
+          if (!err) {
+            orders[idx].items = items.map((item) => {
+              if (item.ProductImage) {
+                item.ProductImageURL = `data:image/png;base64,${Buffer.from(item.ProductImage).toString("base64")}`;
+              }
+              return item;
+            });
+          } else {
+            orders[idx].items = [];
+          }
+          completed++;
+          if (completed === orders.length) {
+            res.status(200).json(orders);
+          }
+        }
+      );
+    });
+  });
+});
+
+// 4b) GET Admin Orders — all orders with user and product details
+app.get('/api/orders/admin', (req, res) => {
+  const query = `
+    SELECT o.OrderID, o.OrderDate, o.UserID, u.Name AS UserName, u.Email AS UserEmail,
+           s.Status AS ShippingStatus, s.TrackingNumber, s.RecipientName, s.Phone, s.Address,
+           s.CreatedAt AS ShippingCreatedAt, s.UpdatedAt AS ShippingUpdatedAt, s.PaymentMethod
+    FROM Orders o
+    JOIN Users u ON o.UserID = u.UserID
+    LEFT JOIN Shipping s ON o.OrderID = s.OrderID
+    ORDER BY o.OrderDate DESC
+  `;
+  connection.query(query, (err, orders) => {
+    if (err) {
+      return res.status(500).json({ error: "Error fetching admin orders", details: err.message });
+    }
+    if (orders.length === 0) return res.status(200).json(orders);
+
+    let completed = 0;
+    orders.forEach((order, idx) => {
+      connection.query(
+        `SELECT oi.*, p.ProductName
+         FROM Order_Items oi
+         JOIN Products p ON oi.ProductID = p.ProductID
+         WHERE oi.OrderID = ?`,
+        [order.OrderID],
+        (err, items) => {
+          if (!err) orders[idx].items = items;
+          else orders[idx].items = [];
+          completed++;
+          if (completed === orders.length) res.status(200).json(orders);
+        }
+      );
+    });
   });
 });
 
@@ -302,6 +409,143 @@ app.post('/api/category-item', (req, res) => {
   });
 });
 
+// ---------------- CHECKOUT ENDPOINT ----------------
+
+// Atomic checkout: create order, order items, shipping, deduct stock in one transaction
+app.post('/api/checkout', (req, res) => {
+  const { userId, items, shipping: shippingData } = req.body;
+  const uid = Number(userId);
+
+  if (!uid || !items || !items.length || !shippingData) {
+    return res.status(400).json({ error: "Missing required fields: userId, items, shipping" });
+  }
+
+  connection.beginTransaction((err) => {
+    if (err) {
+      console.error('[Checkout] beginTransaction error:', err.message);
+      return res.status(500).json({ error: "Transaction error", details: err.message });
+    }
+
+    // Step 1: Create the order
+    connection.query("INSERT INTO Orders (UserID) VALUES (?)", [uid], (err, orderResult) => {
+      if (err) {
+        console.error('[Checkout] Insert order error:', err.message);
+        return connection.rollback(() => {
+          res.status(500).json({ error: "Error creating order", details: err.message });
+        });
+      }
+
+      const orderId = orderResult.insertId;
+      let totalAmount = 0;
+      let idx = 0;
+
+      // Step 2: Process items sequentially (single connection can't handle parallel queries)
+      function processNext() {
+        if (idx >= items.length) {
+          // All items done — insert shipping
+          return insertShipping();
+        }
+
+        const item = items[idx];
+        idx++;
+
+        // Get product data
+        connection.query(
+          "SELECT ProductID, ProductName, ProductPrice, ProductStock FROM Products WHERE ProductID = ?",
+          [item.productId],
+          (err, products) => {
+            if (err) {
+              console.error('[Checkout] Query product error:', err.message);
+              return connection.rollback(() => {
+                res.status(500).json({ error: "Error querying product", details: err.message });
+              });
+            }
+
+            if (products.length === 0) {
+              return connection.rollback(() => {
+                res.status(404).json({ error: "Checkout failed", details: `Product ${item.productId} not found` });
+              });
+            }
+
+            const product = products[0];
+            if (product.ProductStock < item.quantity) {
+              return connection.rollback(() => {
+                res.status(409).json({ error: "Checkout failed", details: `Insufficient stock for "${product.ProductName}": only ${product.ProductStock} left` });
+              });
+            }
+
+            totalAmount += product.ProductPrice * item.quantity;
+
+            // Insert order item
+            connection.query(
+              "INSERT INTO Order_Items (OrderID, ProductID, Number, Price) VALUES (?, ?, ?, ?)",
+              [orderId, item.productId, item.quantity, product.ProductPrice],
+              (err) => {
+                if (err) {
+                  console.error('[Checkout] Insert order item error:', err.message);
+                  return connection.rollback(() => {
+                    res.status(500).json({ error: "Error inserting order item", details: err.message });
+                  });
+                }
+
+                // Deduct stock
+                connection.query(
+                  "UPDATE Products SET ProductStock = ProductStock - ? WHERE ProductID = ?",
+                  [item.quantity, item.productId],
+                  (err) => {
+                    if (err) {
+                      console.error('[Checkout] Deduct stock error:', err.message);
+                      return connection.rollback(() => {
+                        res.status(500).json({ error: "Error deducting stock", details: err.message });
+                      });
+                    }
+                    processNext();
+                  }
+                );
+              }
+            );
+          }
+        );
+      }
+
+      // Step 3: Insert shipping and commit
+      function insertShipping() {
+        connection.query(
+          "INSERT INTO Shipping (OrderID, RecipientName, Phone, Address, Status, PaymentMethod) VALUES (?, ?, ?, ?, 0, ?)",
+          [
+            orderId,
+            shippingData.RecipientName || null,
+            shippingData.Phone || null,
+            shippingData.Address || null,
+            shippingData.PaymentMethod || 'Credit Card',
+          ],
+          (err) => {
+            if (err) {
+              console.error('[Checkout] Insert shipping error:', err.message);
+              return connection.rollback(() => {
+                res.status(500).json({ error: "Error creating shipping", details: err.message });
+              });
+            }
+
+            connection.commit((err) => {
+              if (err) {
+                console.error('[Checkout] Commit error:', err.message);
+                return connection.rollback(() => {
+                  res.status(500).json({ error: "Commit error", details: err.message });
+                });
+              }
+              console.log(`[Checkout] Order #${orderId} created, total: ${totalAmount}, items: ${items.length}`);
+              res.status(201).json({ message: "Checkout successful", orderId, totalAmount });
+            });
+          }
+        );
+      }
+
+      processNext();
+    });
+  });
+});
+
 // ---------------- UPDATE ENDPOINTS ----------------
 
 // 1) Update User Information
@@ -384,7 +628,54 @@ app.put('/api/products/update', upload.single('ProductImage'), (req, res) => {
     res.status(200).json({ message: "Product updated successfully.", results });
   });
 });
-  
+
+// 3) Simulate Payment — mark order as paid (Status 0 → 1)
+app.put('/api/orders/:orderId/pay', (req, res) => {
+  const orderId = req.params.orderId;
+  shipping.updateShipping(orderId, { Status: 1 }, (err) => {
+    if (err) {
+      return res.status(err.message.includes('not found') ? 404 : 500).json({
+        error: "Error updating payment status",
+        details: err.message,
+      });
+    }
+    res.status(200).json({ message: "Payment successful", orderId });
+  });
+});
+
+// 4) Update Shipping Info (admin)
+app.put('/api/orders/:orderId/shipping', (req, res) => {
+  const orderId = req.params.orderId;
+  const { Status, TrackingNumber } = req.body;
+  shipping.updateShipping(orderId, { Status, TrackingNumber }, (err) => {
+    if (err) {
+      return res.status(err.message.includes('not found') ? 404 : 500).json({
+        error: "Error updating shipping",
+        details: err.message,
+      });
+    }
+    res.status(200).json({ message: "Shipping updated", orderId });
+  });
+});
+
+// 5) Update Product Image (admin)
+app.put('/api/products/:id/image', upload.single('ProductImage'), (req, res) => {
+  const productId = req.params.id;
+  if (!req.file) {
+    return res.status(400).json({ error: "No image file provided." });
+  }
+  const query = "UPDATE Products SET ProductImage = ? WHERE ProductID = ?";
+  connection.query(query, [req.file.buffer, productId], (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: "Error updating product image", details: err.message });
+    }
+    if (results.affectedRows === 0) {
+      return res.status(404).json({ message: "Product not found." });
+    }
+    res.status(200).json({ message: "Product image updated successfully." });
+  });
+});
+
 // ---------------- DELETE ENDPOINTS ----------------
 
 // IMPORTANT: Place the "byCredentials" route before the generic /:id route.
@@ -472,7 +763,11 @@ app.delete('/api/orders/:id', (req, res) => {
   });
 });
   
-// ---------------- ROOT ENDPOINT ----------------
+// ---------------- ROOT & GREETING ENDPOINTS ----------------
+app.get('/greeting', (req, res) => {
+  res.send('hello from the server!');
+});
+
 app.get('/', (req, res) => {
   res.send("API is running. Use /api endpoints to test CRUD operations.");
 });

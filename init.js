@@ -71,6 +71,7 @@ const createOrderItemsTable = () => {
         OrderID INT,
         ProductID INT,
         Number INT NOT NULL CHECK (Number > 0),
+        Price INT NOT NULL DEFAULT 0,
         PRIMARY KEY (OrderID, ProductID),
         FOREIGN KEY (OrderID) REFERENCES Orders(OrderID) ON DELETE CASCADE,
         FOREIGN KEY (ProductID) REFERENCES Products(ProductID) ON DELETE CASCADE
@@ -104,6 +105,88 @@ const createCategoryTypeTable = () => {
     });
 };
 
+// Function to alter Order_Items table to add Price column if not exists
+const alterOrderItemsTable = (callback) => {
+  const query = `ALTER TABLE Order_Items ADD COLUMN Price INT NOT NULL DEFAULT 0`;
+  connection.query(query, (err) => {
+    if (err) {
+      if (err.errno === 1060) {
+        console.log('Order_Items Price column already exists.');
+      } else {
+        console.error('Error altering Order_Items table:', err.message);
+      }
+    } else {
+      console.log('Order_Items table altered (Price column added).');
+    }
+    if (callback) callback();
+  });
+};
+
+// Function to alter Shipping table to add PaymentMethod column if not exists
+const alterShippingTable = (callback) => {
+  const query = `ALTER TABLE Shipping ADD COLUMN PaymentMethod VARCHAR(50) DEFAULT 'Credit Card'`;
+  connection.query(query, (err) => {
+    if (err) {
+      if (err.errno === 1060) {
+        console.log('Shipping PaymentMethod column already exists.');
+      } else {
+        console.error('Error altering Shipping table:', err.message);
+      }
+    } else {
+      console.log('Shipping table altered (PaymentMethod column added).');
+    }
+    if (callback) callback();
+  });
+};
+
+// Function to seed admin user if not exists
+const seedAdminUser = () => {
+  const checkQuery = `SELECT UserID FROM Users WHERE Name = 'admin'`;
+  connection.query(checkQuery, (err, results) => {
+    if (err) {
+      console.error('Error checking admin user:', err);
+      return;
+    }
+    if (results.length === 0) {
+      const insertQuery = `INSERT INTO Users (Name, Email, Password, Role) VALUES ('admin', 'admin@eshop.com', 'admin123', 1)`;
+      connection.query(insertQuery, (err2) => {
+        if (err2) {
+          console.error('Error seeding admin user:', err2);
+        } else {
+          console.log('Admin user seeded: admin / admin123');
+        }
+      });
+    } else {
+      console.log('Admin user already exists.');
+    }
+  });
+};
+
+// Function to create the Shipping table
+const createShippingTable = () => {
+  const query = `
+    CREATE TABLE IF NOT EXISTS Shipping (
+      ShippingID INT AUTO_INCREMENT PRIMARY KEY,
+      OrderID INT NOT NULL,
+      RecipientName VARCHAR(100) DEFAULT NULL,
+      Phone VARCHAR(30) DEFAULT NULL,
+      Address VARCHAR(300) DEFAULT NULL,
+      Status TINYINT(1) NOT NULL DEFAULT 0,
+      TrackingNumber VARCHAR(100) DEFAULT NULL,
+      CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UpdatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (OrderID) REFERENCES Orders(OrderID) ON DELETE CASCADE
+    );
+  `;
+  connection.query(query, (err) => {
+    if (err) {
+      console.error('Error creating Shipping table:', err);
+    } else {
+      console.log('Shipping table created or already exists.');
+    }
+  });
+};
+
 // Function to create the Category_item table
 const createCategoryItemTable = () => {
     const query = `
@@ -127,11 +210,15 @@ const createCategoryItemTable = () => {
 
 
 // Export functions
-module.exports = { 
+module.exports = {
     createUsersTable,
     createProductsTable,
     createOrdersTable,
     createOrderItemsTable,
+    alterOrderItemsTable,
+    createShippingTable,
+    alterShippingTable,
+    seedAdminUser,
     createCategoryTypeTable,
     createCategoryItemTable
 };
